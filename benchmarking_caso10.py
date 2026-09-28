@@ -1,72 +1,87 @@
 import os
 import time
-import h5py
-import numpy as np
-import boto3
-from moto import mock_aws
+from azure.storage.blob import BlobServiceClient
 
-# Nombre del bucket y del archivo para el Caso 10
-BUCKET_NAME = "bucket-grafo-caso10"
-FILE_NAME = "grafo_social_caso10.h5"
+ACCOUNT_NAME = "stgredesdazh2026"
+SAS_TOKEN = "se=2026-09-26T00%3A00%3A00Z&sp=rwdlac&sv=2026-04-06&ss=b&srt=sco&sig=FdQ73gHIetecEvsXd2EyTiPS4%2BGPf8YP8X8WaUYS1Dg%3D"
 
-# 1. Crear dataset .H5 de prueba para el Caso 10 (Grafos Sociales)
-def crear_archivo_h5(nombre_archivo, tamano_mb=50):
-    print(f" Generando dataset .H5 ({tamano_mb} MB)...")
-    num_elementos = (tamano_mb * 1024 * 1024) // 8
-    datos = np.random.rand(num_elementos)
-    
-    with h5py.File(nombre_archivo, 'w') as f:
-        f.create_dataset("matriz_interacciones", data=datos, compression="gzip")
-    
-    peso_real = os.path.getsize(nombre_archivo) / (1024 * 1024)
-    print(f" Archivo '{nombre_archivo}' listo ({peso_real:.2f} MB).\n")
+CONTAINER_NAME = "practica-redes"
+FILE_SIZE_MB = 10  # Tamaño del archivo de prueba en MB
 
-# 2. Benchmarking S3 simulado localmente con @mock_aws (Sin dependencias externas)
-@mock_aws
-def ejecutar_benchmark_s3(file_path):
-    print("--- INICIANDO BENCHMARKING DE S3 (ENTORNO LOCAL) ---")
-    
-    # Cliente de S3 simulado en memoria
-    s3_client = boto3.client('s3', region_name='us-east-1')
-    s3_client.create_bucket(Bucket=BUCKET_NAME)
+ACCOUNT_URL = f"https://{ACCOUNT_NAME}.blob.core.windows.net"
 
-    file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
-    object_name = os.path.basename(file_path)
 
-    # Medir Subida (PUT)
-    start_time = time.time()
-    s3_client.upload_file(file_path, BUCKET_NAME, object_name)
-    upload_time = time.time() - start_time
-    upload_throughput = file_size_mb / upload_time if upload_time > 0 else file_size_mb / 0.001
+def probar_rendimiento_red():
+    print("Iniciando cliente de Azure Blob Storage con SAS Token...")
 
-    print(f"  Subida S3 completada en {upload_time:.4f} s | Throughput: {upload_throughput:.2f} MB/s")
+    # Cliente autenticado mediante SAS Token
+    blob_service_client = BlobServiceClient(
+        account_url=ACCOUNT_URL, credential=SAS_TOKEN
+    )
 
-    # Medir Descarga (GET)
-    download_path = "descargado_" + object_name
-    start_time = time.time()
-    s3_client.download_file(BUCKET_NAME, object_name, download_path)
-    download_time = time.time() - start_time
-    download_throughput = file_size_mb / download_time if download_time > 0 else file_size_mb / 0.001
+    # 1. Obtener o crear contenedor
+    container_client = blob_service_client.get_container_client(CONTAINER_NAME)
+    try:
+        container_client.create_container()
+        print(f"Contenedor '{CONTAINER_NAME}' creado exitosamente.")
+    except Exception:
+        print(f"Conectado al contenedor '{CONTAINER_NAME}'.")
 
-    print(f"  Descarga S3 completada en {download_time:.4f} s | Throughput: {download_throughput:.2f} MB/s")
+    # 2. Medición de Latencia (RTT)
+    print("\n[1/3] Midiendo Latencia (RTT)...")
+    small_data = os.urandom(1024)  # 1 KB
+    rtt_blob_client = container_client.get_blob_client("rtt_ping.bin")
 
-    # Limpieza del archivo descargado
-    if os.path.exists(download_path):
-        os.remove(download_path)
+    t_inicio = time.perf_counter()
+    rtt_blob_client.upload_blob(small_data, overwrite=True)
+    t_fin = time.perf_counter()
 
-# 3. Proyección de Costos (Requisito de la rúbrica)
-def mostrar_proyeccion_costos(gb_totales=15):
-    print("\n==========================================")
-    print(f" PROYECCIÓN DE COSTOS MENSUALES ({gb_totales} GB)")
-    print("==========================================")
-    costo_s3_std = gb_totales * 0.023
-    costo_azure_hot = gb_totales * 0.018
-    print(f" AWS S3 Standard:     ${costo_s3_std:.3f} USD / mes")
-    print(f" Azure Blob Hot Tier: ${costo_azure_hot:.3f} USD / mes")
+    latencia_ms = (t_fin - t_inicio) * 1000
+    rtt_blob_client.delete_blob()
+
+    # 3. Medición de Subida (Upload)
+    print(f"[2/3] Generando {FILE_SIZE_MB} MB y subiendo a 'westus'...")
+    data_payload = os.urandom(FILE_SIZE_MB * 1024 * 1024)
+    blob_client = container_client.get_blob_client("test_redes_10mb.bin")
+
+    t_inicio = time.perf_counter()
+    blob_client.upload_blob(data_payload, overwrite=True)
+    t_fin = time.perf_counter()
+
+    tiempo_subida = t_fin - t_inicio
+    v_subida_mbs = FILE_SIZE_MB / tiempo_subida
+    bw_subida_mbps = (FILE_SIZE_MB * 8) / tiempo_subida
+
+    # 4. Medición de Descarga (Download)
+    print("[3/3] Midiendo descarga del archivo...")
+
+    t_inicio = time.perf_counter()
+    download_stream = blob_client.download_blob()
+    _ = download_stream.readall()
+    t_fin = time.perf_counter()
+
+    tiempo_descarga = t_fin - t_inicio
+    v_descarga_mbs = FILE_SIZE_MB / tiempo_descarga
+    bw_descarga_mbps = (FILE_SIZE_MB * 8) / tiempo_descarga
+
+    # Limpieza
+    blob_client.delete_blob()
+
+    # 5. Despliegue de Resultados
+    print("\n" + "=" * 50)
+    print("        MÉTRICAS DE RED (AZURE WESTUS)")
+    print("=" * 50)
+    print(f"Latencia Estimada (RTT):  {latencia_ms:.2f} ms")
+    print("-" * 50)
+    print(f"Tiempo de Subida:         {tiempo_subida:.2f} seg")
+    print(f"Velocidad de Subida:      {v_subida_mbs:.2f} MB/s")
+    print(f"Ancho de Banda Subida:    {bw_subida_mbps:.2f} Mbps")
+    print("-" * 50)
+    print(f"Tiempo de Descarga:       {tiempo_descarga:.2f} seg")
+    print(f"Velocidad de Descarga:    {v_descarga_mbs:.2f} MB/s")
+    print(f"Ancho de Banda Descarga:  {bw_descarga_mbps:.2f} Mbps")
+    print("=" * 50)
+
 
 if __name__ == "__main__":
-    if not os.path.exists(FILE_NAME):
-        crear_archivo_h5(FILE_NAME, tamano_mb=50)
-    
-    ejecutar_benchmark_s3(FILE_NAME)
-    mostrar_proyeccion_costos(gb_totales=15)
+    probar_rendimiento_red()
